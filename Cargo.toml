@@ -6,8 +6,9 @@ edition = "2024"
 [dependencies]
 lzma-rs = "0.3.0"
 quick-xml = "0.42.0"
+rfd = "0.18"
 serde = { version = "1.0.229", features = ["derive"] }
-slint = "1.18"
+slint = { version = "1.18", features = ["raw-window-handle-06"] }
 toml = "1.1.7"
 ureq = { version = "3.4.2", features = ["platform-verifier"] }
 

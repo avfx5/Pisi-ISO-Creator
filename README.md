@@ -34,7 +34,12 @@ feature is also available from the command line.
 - **Dry run and plan view** – shows every command before anything is executed.
 - Live, streaming build log, progress and cancellation; mounts are always
   cleaned up, even after failures.
-- Projects and edit jobs are plain TOML files (see [`examples/`](examples)).
+- Projects and edit jobs are plain TOML files (see [`examples/`](examples)),
+  opened and saved with the native file dialogs (**Open…**, **Save**,
+  **Save As…**); pressing Enter in the file field opens the typed path.
+- Compact interface with draggable dividers: between the tabs and the log, and
+  between the package lists and the repository browser (double click a
+  divider to restore its default position).
 
 ## Requirements
 
@@ -52,6 +57,10 @@ Creating and editing images requires **root** and these host tools:
 |-------------|-----------------------------------------------------------------------|
 | Create ISO  | `pisi`, `chroot`, `mount`, `mksquashfs`, `grub2-mkrescue`, `xorriso`, `mformat` (mtools) |
 | Edit ISO    | `xorriso`, `unsquashfs`, `mksquashfs`; `pisi`, `chroot`, `mount` when packages are changed |
+
+The file dialogs use the XDG desktop portal (`xdg-desktop-portal`) and fall
+back to `zenity`. When the interface runs as root (e.g. with `sudo`), the
+portal of the user session is usually not reachable, so install `zenity`.
 
 The host is best a Pisi GNU/Linux system, so that the host `pisi` matches the
 PiSi database format of the image. Missing tools are reported before a run
@@ -142,9 +151,9 @@ recreated on every run.
 pisi-iso-creator import-pisiman Pisilinux-KDE.xml          # writes Pisilinux-KDE.toml
 ```
 
-In the graphical interface enter the path of the XML file as the project file
-and click **Import Pisiman**; check the result and click **Save** (the path is
-changed to the `.toml` file). An existing TOML file is never overwritten by
+In the graphical interface click **Import Pisiman…** and choose the XML file;
+check the result and click **Save** (the path is changed to the `.toml` file)
+or **Save As…**. An existing TOML file is never overwritten by
 the command line.
 
 | Pisiman                                    | Project                                   |

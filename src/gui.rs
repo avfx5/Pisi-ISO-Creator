@@ -11,17 +11,23 @@ use crate::project::{
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 slint::include_modules!();
 
 /// Maximum number of log lines kept in the log view.
 const MAX_LOG_LINES: usize = 3000;
 const MAX_SEARCH_RESULTS: usize = 500;
+
+const TOML_FILTER: (&str, &[&str]) = ("TOML files", &["toml"]);
+const PISIMAN_FILTER: (&str, &[&str]) = ("Pisiman projects", &["xml"]);
+/// A dialog that closes faster than this most likely failed to open.
+const DIALOG_FAILURE_TIME: Duration = Duration::from_millis(300);
 
 #[derive(Default)]
 struct Shared {
@@ -72,47 +78,57 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let weak = ui.as_weak();
     ui.on_open_project(move || {
         let ui = weak.unwrap();
-        let path = PathBuf::from(ui.get_project_path().as_str());
-        match Project::load(&path) {
-            Ok(p) => {
-                project_to_ui(&ui, &p);
-                ui.set_status_text(format!("Opened {}", path.display()).into());
-            }
-            Err(e) => ui.set_status_text(format!("Error: {e}").into()),
-        }
+        let dialog = file_dialog(
+            &ui,
+            "Open Project",
+            &ui.get_project_path(),
+            TOML_FILTER,
+            false,
+        );
+        run_file_dialog(&ui, dialog.pick_file(), load_project);
+    });
+
+    let weak = ui.as_weak();
+    ui.on_load_project(move || {
+        let ui = weak.unwrap();
+        load_project(&ui, path_from(&ui.get_project_path()));
     });
 
     let weak = ui.as_weak();
     ui.on_import_pisiman(move || {
         let ui = weak.unwrap();
-        let path = PathBuf::from(ui.get_project_path().as_str());
-        match pisiman::convert_file(&path) {
-            Ok(c) => {
-                project_to_ui(&ui, &c.project);
-                let target = path.with_extension("toml");
-                ui.set_project_path(target.display().to_string().into());
-                let mut text = format!(
-                    "Imported Pisiman project {}. Check it and save it as {}.",
-                    path.display(),
-                    target.display()
-                );
-                if !c.warnings.is_empty() {
-                    text.push_str(&format!("\n• {}", c.warnings.join("\n• ")));
-                }
-                ui.set_status_text(text.into());
-            }
-            Err(e) => ui.set_status_text(format!("Error: {e}").into()),
-        }
+        let dialog = file_dialog(
+            &ui,
+            "Import Pisiman Project",
+            &ui.get_project_path(),
+            PISIMAN_FILTER,
+            false,
+        );
+        run_file_dialog(&ui, dialog.pick_file(), import_pisiman);
     });
 
     let weak = ui.as_weak();
     ui.on_save_project(move || {
         let ui = weak.unwrap();
-        let path = PathBuf::from(ui.get_project_path().as_str());
-        let result = ui_to_project(&ui).and_then(|p| p.save(&path));
-        ui.set_status_text(match result {
-            Ok(()) => format!("Saved {}", path.display()).into(),
-            Err(e) => format!("Error: {e}").into(),
+        if ui.get_project_path().trim().is_empty() {
+            ui.invoke_save_project_as();
+        } else {
+            save_project(&ui, path_from(&ui.get_project_path()));
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_save_project_as(move || {
+        let ui = weak.unwrap();
+        let dialog = file_dialog(
+            &ui,
+            "Save Project As",
+            &ui.get_project_path(),
+            TOML_FILTER,
+            true,
+        );
+        run_file_dialog(&ui, dialog.save_file(), |ui, path| {
+            save_project(ui, with_toml_extension(path));
         });
     });
 
@@ -147,26 +163,46 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     // ---- Edit jobs ----
     let weak = ui.as_weak();
+    ui.on_open_edit_job(move || {
+        let ui = weak.unwrap();
+        let dialog = file_dialog(
+            &ui,
+            "Open Edit Job",
+            &ui.get_edit_job_path(),
+            TOML_FILTER,
+            false,
+        );
+        run_file_dialog(&ui, dialog.pick_file(), load_edit_job);
+    });
+
+    let weak = ui.as_weak();
     ui.on_load_edit_job(move || {
         let ui = weak.unwrap();
-        let path = PathBuf::from(ui.get_edit_job_path().as_str());
-        match EditJob::load(&path) {
-            Ok(job) => {
-                edit_job_to_ui(&ui, &job);
-                ui.set_status_text(format!("Opened {}", path.display()).into());
-            }
-            Err(e) => ui.set_status_text(format!("Error: {e}").into()),
-        }
+        load_edit_job(&ui, path_from(&ui.get_edit_job_path()));
     });
 
     let weak = ui.as_weak();
     ui.on_save_edit_job(move || {
         let ui = weak.unwrap();
-        let path = PathBuf::from(ui.get_edit_job_path().as_str());
-        let result = ui_to_edit_job(&ui).and_then(|j| j.save(&path));
-        ui.set_status_text(match result {
-            Ok(()) => format!("Saved {}", path.display()).into(),
-            Err(e) => format!("Error: {e}").into(),
+        if ui.get_edit_job_path().trim().is_empty() {
+            ui.invoke_save_edit_job_as();
+        } else {
+            save_edit_job(&ui, path_from(&ui.get_edit_job_path()));
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_save_edit_job_as(move || {
+        let ui = weak.unwrap();
+        let dialog = file_dialog(
+            &ui,
+            "Save Edit Job As",
+            &ui.get_edit_job_path(),
+            TOML_FILTER,
+            true,
+        );
+        run_file_dialog(&ui, dialog.save_file(), |ui, path| {
+            save_edit_job(ui, with_toml_extension(path));
         });
     });
 
@@ -338,6 +374,164 @@ pub fn run() -> Result<(), slint::PlatformError> {
     );
 
     ui.run()
+}
+
+// ---- Files and dialogs ----
+
+fn path_from(text: &str) -> PathBuf {
+    PathBuf::from(text.trim())
+}
+
+/// Shows `path` relative to the working directory when it lies below it.
+fn display_path(path: &Path) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn with_toml_extension(path: PathBuf) -> PathBuf {
+    if path.extension().is_some() {
+        path
+    } else {
+        path.with_extension("toml")
+    }
+}
+
+/// Native file dialog that starts in the folder of `current` (a path typed
+/// in the UI, possibly relative or empty); `suggest_name` preselects its file
+/// name, used by save dialogs.
+fn file_dialog(
+    ui: &AppWindow,
+    title: &str,
+    current: &str,
+    (filter_name, extensions): (&str, &[&str]),
+    suggest_name: bool,
+) -> rfd::AsyncFileDialog {
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_title(title)
+        .add_filter(filter_name, extensions)
+        .add_filter("All files", &["*"])
+        .set_parent(&ui.window().window_handle());
+    let current = std::path::absolute(current.trim()).unwrap_or_default();
+    let dir = if current.is_dir() {
+        Some(current.as_path())
+    } else {
+        current.parent().filter(|dir| dir.is_dir())
+    };
+    match dir {
+        Some(dir) => dialog = dialog.set_directory(dir),
+        None => {
+            if let Ok(cwd) = std::env::current_dir() {
+                dialog = dialog.set_directory(cwd);
+            }
+        }
+    }
+    if suggest_name
+        && !current.is_dir()
+        && let Some(name) = current.file_name()
+    {
+        dialog = dialog.set_file_name(name.to_string_lossy());
+    }
+    dialog
+}
+
+/// Runs a file dialog without blocking the event loop and passes the chosen
+/// path to `done`. File actions are disabled while the dialog is open.
+fn run_file_dialog(
+    ui: &AppWindow,
+    dialog: impl Future<Output = Option<rfd::FileHandle>> + 'static,
+    done: impl FnOnce(&AppWindow, PathBuf) + 'static,
+) {
+    if ui.get_file_dialog_open() {
+        return;
+    }
+    ui.set_file_dialog_open(true);
+    let weak = ui.as_weak();
+    let started = Instant::now();
+    let spawned = slint::spawn_local(async move {
+        let file = dialog.await;
+        let Some(ui) = weak.upgrade() else { return };
+        ui.set_file_dialog_open(false);
+        match file {
+            Some(file) => done(&ui, file.path().to_path_buf()),
+            // Without xdg-desktop-portal and zenity rfd returns at once.
+            None if started.elapsed() < DIALOG_FAILURE_TIME => ui.set_status_text(
+                "Error: Can not show a file dialog (xdg-desktop-portal or zenity is needed). \
+                 Type the path into the file field and press Enter to open it."
+                    .into(),
+            ),
+            None => {}
+        }
+    });
+    if let Err(e) = spawned {
+        ui.set_file_dialog_open(false);
+        ui.set_status_text(format!("Error: Can not show a file dialog: {e}").into());
+    }
+}
+
+fn load_project(ui: &AppWindow, path: PathBuf) {
+    match Project::load(&path) {
+        Ok(p) => {
+            project_to_ui(ui, &p);
+            ui.set_project_path(display_path(&path).into());
+            ui.set_status_text(format!("Opened {}", path.display()).into());
+        }
+        Err(e) => ui.set_status_text(format!("Error: {e}").into()),
+    }
+}
+
+fn save_project(ui: &AppWindow, path: PathBuf) {
+    match ui_to_project(ui).and_then(|p| p.save(&path)) {
+        Ok(()) => {
+            ui.set_project_path(display_path(&path).into());
+            ui.set_status_text(format!("Saved {}", path.display()).into());
+        }
+        Err(e) => ui.set_status_text(format!("Error: {e}").into()),
+    }
+}
+
+fn import_pisiman(ui: &AppWindow, path: PathBuf) {
+    match pisiman::convert_file(&path) {
+        Ok(c) => {
+            project_to_ui(ui, &c.project);
+            let target = path.with_extension("toml");
+            ui.set_project_path(display_path(&target).into());
+            let mut text = format!(
+                "Imported Pisiman project {}. Check it and save it as {}.",
+                path.display(),
+                target.display()
+            );
+            if !c.warnings.is_empty() {
+                text.push_str(&format!("\n• {}", c.warnings.join("\n• ")));
+            }
+            ui.set_status_text(text.into());
+        }
+        Err(e) => ui.set_status_text(format!("Error: {e}").into()),
+    }
+}
+
+fn load_edit_job(ui: &AppWindow, path: PathBuf) {
+    match EditJob::load(&path) {
+        Ok(job) => {
+            edit_job_to_ui(ui, &job);
+            ui.set_edit_job_path(display_path(&path).into());
+            ui.set_status_text(format!("Opened {}", path.display()).into());
+        }
+        Err(e) => ui.set_status_text(format!("Error: {e}").into()),
+    }
+}
+
+fn save_edit_job(ui: &AppWindow, path: PathBuf) {
+    match ui_to_edit_job(ui).and_then(|j| j.save(&path)) {
+        Ok(()) => {
+            ui.set_edit_job_path(display_path(&path).into());
+            ui.set_status_text(format!("Saved {}", path.display()).into());
+        }
+        Err(e) => ui.set_status_text(format!("Error: {e}").into()),
+    }
 }
 
 fn append_log(ui: &AppWindow, state: &Rc<RefCell<UiState>>, text: &str) {
